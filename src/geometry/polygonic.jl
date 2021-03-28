@@ -34,7 +34,7 @@ struct Rectangle <: Polygonic
 end
 
 
-@inline function isInside(this::T, q::Vec2f) where {T<:Polygonic}
+@inline function isInside(this::T, q) where {T<:Polygonic}
     # note: n'x = n'b
     @inbounds q_vec = [q[1]; q[2]]
     for n = 1:this.N

@@ -1,20 +1,17 @@
 mutable struct World
-    x_min
-    x_max
-    v_min
-    v_max
-    Pset::Vector{Polygonic}
-    function World(x_min, x_max, v_min, v_max, Pset)
-        new(x_min, x_max, v_min, v_max, Pset)
+    lower_bounds
+    upper_bounds
+    state_size::Int
+    Pset::Vector{Polygonic}  # Obstacles
+    function World(lower_bounds, upper_bounds, Pset)
+        new(lower_bounds, upper_bounds, size(upper_bounds, 1), Pset)
     end
 end
 
-@inline function isValid(this::World, s_q::Vec4f)
+@inline function isValid(this::World, s_q)
     # check if the sampled point is inside the world"
-    @inbounds !(this.x_min[1]<s_q[1]<this.x_max[1]) && return false
-    @inbounds !(this.x_min[2]<s_q[2]<this.x_max[2]) && return false
-    @inbounds !(this.v_min[1]<s_q[3]<this.v_max[1]) && return false
-    @inbounds !(this.v_min[2]<s_q[4]<this.v_max[2]) && return false
+    all(this.lower_bounds .< s_q) || return false
+    all(s_q .< this.upper_bounds) || return false
 
     # check if point is not already sampled (within some radius of another point)
     for P in this.Pset
@@ -23,16 +20,16 @@ end
     return true
 end
 
-@inline function isValid(this::World, q_set::Vector{Vec4f})
-    # check validity for multiple points.
-    # will be used for piecewize path consited of multiple points
-    for q in q_set
-        !isValid(this, q) && return false
-    end
-    return true
-end
+# @inline function isValid(this::World, q_set)
+#     # check validity for multiple points.
+#     # will be used for piecewize path consited of multiple points
+#     for q in q_set
+#         !isValid(this, q) && return false
+#     end
+#     return true
+# end
 
-@inline function isIntersect(this::World, q1::Vec4f, q2::Vec4f)
+@inline function isIntersect(this::World, q1, q2)
     for P in this.Pset
         isIntersect(P, q1, q2) && return true
     end
@@ -41,10 +38,10 @@ end
 
 
 function show(this::World)
-    p1 = [this.x_min[1], this.x_min[2]]
-    p2 = [this.x_min[1], this.x_max[2]]
-    p3 = [this.x_max[1], this.x_max[2]]
-    p4 = [this.x_max[1], this.x_min[2]]
+    p1 = [this.lower_bounds[1], this.lower_bounds[2]]
+    p2 = [this.lower_bounds[1], this.upper_bounds[2]]
+    p3 = [this.upper_bounds[1], this.upper_bounds[2]]
+    p4 = [this.upper_bounds[1], this.lower_bounds[2]]
     plot([p1[1], p2[1]], [p1[2], p2[2]], "k-")
     plot([p2[1], p3[1]], [p2[2], p3[2]], "k-")
     plot([p3[1], p4[1]], [p3[2], p4[2]], "k-")

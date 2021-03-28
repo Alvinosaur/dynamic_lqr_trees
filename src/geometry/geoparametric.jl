@@ -12,12 +12,12 @@ struct Sphere <: GeoParametric
     r::Float64
 end
 
-@inline function isInside(this::Sphere, x::SVector{2, Float64})
+@inline function isInside(this::Sphere, x)
     @fastmath d = norm(this.c-x)
     return (d < this.r )
 end
 
-@inline function isIntersect(this::Sphere, x_seq::Vector{Vec2f})
+@inline function isIntersect(this::Sphere, x_seq)
     """
     for i in 1:length(x_seq)-1
         @inbounds x0 = x_seq[i]
