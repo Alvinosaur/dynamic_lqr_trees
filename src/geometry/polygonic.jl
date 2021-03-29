@@ -25,6 +25,7 @@ struct Rectangle <: Polygonic
     N::Int
     V::Vector{Vec2f}
     function Rectangle(center::T, width::Float64, height::Float64) where {T<:AbstractVector}
+        # top left, top right, bottom right, bottom left
         V1 = Vec2f(center + [-width, -height]*0.5)
         V2 = Vec2f(center + [+width, -height]*0.5)
         V3 = Vec2f(center + [+width, +height]*0.5)

@@ -5,26 +5,57 @@ using TrajectoryOptimization
 const TO = TrajectoryOptimization
 
 mutable struct RRT
-    start
-    goal
-    S::Int8  # size of state space
+    start::Any
+    goal::Any
+    model::Any
     world::World # simulation world config
-    vertices
-    edges
-    max_dist
-    radius
+    static_constraints::Any  # static world constraints
+    dynamic_constraints::Any
+    vertices::Any
+    edges::Any
+    max_dist::Any
+    radius::Any
 
-    function RRT(start, goal, world; max_dist, radius)
+    function RRT(start, goal, model, world)
         vertices = [goal]  # search backwards from goal to start
         edges = [[]]
-        new(start, goal, size(start, 1), world, vertices, edges, max_dist, radius)
+        static_constraints = gen_static_constraints(world, model)
+
+        N = 10  # fixed number of knots
+        dynamic_constraints = ConstraintList(model.n, model.m, N)
+        # only from 1:N-1, the Nth constraint is terminal constraint
+        # add_constraint!(
+        #     dynamic_constraints,
+        #     BoundConstraint(
+        #         model.n,
+        #         model.m,
+        #         u_min = world.lower_bounds[3:4],
+        #         u_max = world.upper_bounds[3:4],
+        #     ),
+        #     1:N-1,
+        # )
+
+        new(
+            start,
+            goal,
+            model,
+            world,
+            static_constraints,
+            dynamic_constraints,
+            vertices,
+            edges,
+            0.2,
+            0.1,
+        )
+
     end
 end
 
 function SampleState(this::RRT)
     while (true)
-        x = this.world.lower_bounds + (
-            this.world.upper_bounds - this.world.lower_bounds).*rand(this.S)
+        x =
+            this.world.lower_bounds +
+            (this.world.upper_bounds - this.world.lower_bounds) .* rand(2)
         if isValid(this.world, x)
             return x
         end
@@ -51,7 +82,8 @@ function Nearest(this::RRT, x)
 end
 
 function NewVertex(this::RRT; cur, target)
-    vec = target - cur 
+    # general_constraints = combine_constraints(static_constraints, dynamic_constraints)
+    vec = target - cur
     dist = Distance(this, cur, target)
     vec = vec / dist
     dist = min(dist, this.max_dist)
@@ -68,6 +100,7 @@ function NewVertex(this::RRT; cur, target)
         end
     end
     return new_vert, is_expanded
+
 end
 
 function AddVertex(this::RRT, vert)
@@ -82,26 +115,28 @@ function AddEdge(this::RRT, vert1_idx, vert2_idx, dist)
 end
 
 function gen_trajectory(this::RRT, x1, x2, N)
-    vec = x2 - x1 
+    n, m = size(this.model)
+    vec = x2 - x1
     dist = Distance(this, x2, x1)
     vec = vec / dist
-    wpts = zeros(2, N+1)
+    wpts = zeros(2, N + 1)
     for t = 0:N
         x = x1 + vec * dist * (t / N)
         wpts[:, t+1] = x
     end
     return wpts
+
 end
 
 function show_trajectory(this::RRT, x1, x2, N_split = 20, c_ = :gray, linewidth_ = 0.5)
-    wpts =  gen_trajectory(this, x1, x2, N_split)
-    @views plot(wpts[1, :], wpts[2, :], c=c_, linewidth = linewidth_)
+    wpts = gen_trajectory(this, x1, x2, N_split)
+    @views plot(wpts[1, :], wpts[2, :], c = c_, linewidth = linewidth_)
 end
 
 function Search(this::RRT, max_iters, visualize)
     iter = 0
     done = false
-    while(!done)
+    while (!done)
         iter += 1
         x = SampleState(this)
         nearest, nearest_idx = Nearest(this, x)
@@ -110,14 +145,14 @@ function Search(this::RRT, max_iters, visualize)
         # so we can just solve optimal traj from cur=x to target=nearest 
         # but for holonomic test version, need to branch from existing
         # to new node and stop when hit obstacle.
-        new_vert, is_expanded = NewVertex(this, cur=nearest, target=x)
+        new_vert, is_expanded = NewVertex(this, cur = nearest, target = x)
         if !is_expanded
             continue
         end
         new_vert_idx = AddVertex(this, new_vert)
         cost = Distance(this, nearest, new_vert)
         AddEdge(this, nearest_idx, new_vert_idx, cost)
-        
+
         # Search backwards from goal to start
         start_dist = Distance(this, new_vert, start)
         if start_dist < 2 * this.radius
@@ -134,7 +169,7 @@ function Search(this::RRT, max_iters, visualize)
         if visualize
             close()
             show(this)
-            savefig("fig/"*string(iter)*".png")
+            savefig("fig/" * string(iter) * ".png")
         end
     end
     return done, BuildPath(this)
@@ -164,17 +199,17 @@ function BuildPath(this::RRT)
         neighbors = this.edges[cur_idx]
         for (trans_cost, next_idx) in neighbors
             new_g = cur_g + trans_cost
-            
+
             if get(G, next_idx, nothing) == nothing || new_g < G[next_idx]
                 G[next_idx] = new_g
                 h = Distance(this, this.vertices[next_idx], start)
-                f = new_g + ϵ*h
+                f = new_g + ϵ * h
                 push!(open, (f, next_idx))
                 successor[next_idx] = cur_idx
             end
         end
     end
-    
+
     path = []
     cur_idx = start_idx
     # path doesn't include start, ends with goal
@@ -184,7 +219,6 @@ function BuildPath(this::RRT)
     end
     return path
 end
-
 
 
 function show(this::RRT)
@@ -199,22 +233,22 @@ function show(this::RRT)
     # idxset_closed = findall(this.bool_closed)
     # idxset_unvisit = findall(this.bool_unvisit)  
     # idxset_tree = setdiff(union(idxset_open, idxset_closed), [1])
-    scatter(mat[1, 1], mat[2, 1], c=:blue, s=10, zorder = 100)
-    scatter(mat[1, end], mat[2, end], c=:blue, s=10, zorder = 101)
-    scatter(mat[1, 2:end], mat[2, 2:end], c=:gray, s=2)
-    scatter(mat[1, 2:end], mat[2, 2:end], c=:gray, s=2)
+    scatter(mat[1, 1], mat[2, 1], c = :blue, s = 10, zorder = 100)
+    scatter(mat[1, end], mat[2, end], c = :blue, s = 10, zorder = 101)
+    scatter(mat[1, 2:end], mat[2, 2:end], c = :gray, s = 2)
+    scatter(mat[1, 2:end], mat[2, 2:end], c = :gray, s = 2)
     #scatter(mat[1, idxset_unvisit], mat[2, idxset_unvisit], c=:orange, s=5)
     for idx = 1:N
         neighbors = this.edges[idx]
-        for (_, next_idx) in neighbors 
+        for (_, next_idx) in neighbors
             show_trajectory(this, this.vertices[idx], this.vertices[next_idx])
         end
     end
 
-    scatter(mat[1, 1], mat[2, 1], c=:blue, s=20, zorder = 100)
-    scatter(mat[1, end], mat[2, end], c=:blue, s=20, zorder = 101)
+    scatter(mat[1, 1], mat[2, 1], c = :blue, s = 20, zorder = 100)
+    scatter(mat[1, end], mat[2, end], c = :blue, s = 20, zorder = 101)
 
-    xlim(this.world.lower_bounds[1]-0.05, this.world.upper_bounds[1]+0.05)
-    ylim(this.world.lower_bounds[2]-0.05, this.world.upper_bounds[2]+0.05)
+    xlim(this.world.lower_bounds[1] - 0.05, this.world.upper_bounds[1] + 0.05)
+    ylim(this.world.lower_bounds[2] - 0.05, this.world.upper_bounds[2] + 0.05)
     println("finish drawing")
 end
