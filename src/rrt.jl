@@ -1,7 +1,9 @@
+using RecursiveArrayTools
 using DataStructures
 using StaticArrays
 using LinearAlgebra
 using TrajectoryOptimization
+using Altro
 const TO = TrajectoryOptimization
 
 mutable struct RRT
@@ -9,43 +11,52 @@ mutable struct RRT
     goal::Any
     model::Any
     world::World # simulation world config
-    static_constraints::Any  # static world constraints
-    dynamic_constraints::Any
+    constraints::Any  # static and dynamic constraints
     vertices::Any
     edges::Any
-    max_dist::Any
-    radius::Any
+    Q
+    Qf
+    R
+    N::Integer
+    tf
+    max_dist
+    radius
 
     function RRT(start, goal, model, world)
         vertices = [goal]  # search backwards from goal to start
         edges = [[]]
-        static_constraints = gen_static_constraints(world, model)
+        N = 50  # fixed number of knots 
+        tf = 5.0  # fixed time 
+        constraints = gen_static_constraints(world, model, N)
 
-        N = 10  # fixed number of knots
-        dynamic_constraints = ConstraintList(model.n, model.m, N)
-        # only from 1:N-1, the Nth constraint is terminal constraint
-        # add_constraint!(
-        #     dynamic_constraints,
-        #     BoundConstraint(
-        #         model.n,
-        #         model.m,
-        #         u_min = world.lower_bounds[3:4],
-        #         u_max = world.upper_bounds[3:4],
-        #     ),
-        #     1:N-1,
-        # )
+        # State/Dynamics constraints
+        add_constraint!(
+            constraints,
+            BoundConstraint(model.n, model.m, x_min = world.lower_bounds, x_max = world.upper_bounds),
+            1:N-1,  # do not include Nth knot, the terminal since somehow affects controls, which aren't defined at the terminal knot
+        )
 
+        Q = Diagonal(@SVector [1, 1, 1e-3, 1e-3])
+        Qf = 10 * Q
+        R = Diagonal(@SVector ones(model.m))
+        
+        max_dist = 0.2
+        radius = 0.1
         new(
             start,
             goal,
             model,
             world,
-            static_constraints,
-            dynamic_constraints,
+            constraints,
             vertices,
             edges,
-            0.2,
-            0.1,
+            Q,
+            Qf, 
+            R,
+            N,
+            tf,
+            max_dist,
+            radius
         )
 
     end
@@ -55,23 +66,53 @@ function SampleState(this::RRT)
     while (true)
         x =
             this.world.lower_bounds +
-            (this.world.upper_bounds - this.world.lower_bounds) .* rand(2)
+            (this.world.upper_bounds - this.world.lower_bounds) .* rand(this.model.n)
         if isValid(this.world, x)
             return x
         end
     end
 end
 
-function Distance(this::RRT, x1, x2)
-    return norm(x1 - x2)
+function StackArrays(arr_of_arr)
+    # https://discourse.julialang.org/t/very-best-way-to-concatenate-an-array-of-arrays/8672/2
+    arr_of_arr = VectorOfArray(arr_of_arr) 
+    return convert(Array, arr_of_arr)'  # N x n
 end
+
+function GenerateTrajectory(this::RRT, start, goal)
+    obj = LQRObjective(this.Q, this.R, this.Qf, goal, this.N)
+    prob = Problem(this.model, obj, goal, this.tf, x0 = start, constraints = this.constraints, integration=RK3)
+    # initial_controls!(prob, [@SVector rand(model.m) for k = 1:N-1])
+    # rollout!(prob) 
+
+    altro = ALTROSolver(prob)
+    solve!(altro);
+
+    X = StackArrays(states(altro))
+    U = StackArrays(controls(altro))
+    return X, U
+end
+
+
+function Distance(this::RRT, traj)
+    # TODO: This is a horrible way of estimating distance btwn two points
+    # assumes we can solve optimal traj between two states, which defeats the whole purpose of LQR Trees since this should be a hard task done piecewise
+    diff = traj[1:end-1, 1:2] - traj[2:end, 1:2]
+    # https://github.com/JuliaLang/julia/issues/34830#issuecomment-589942875
+    piecewise_dist = sum(map(norm, eachslice(diff, dims=1)))
+    return piecewise_dist
+end
+
+
 
 function Nearest(this::RRT, x)
     min_dist = Inf
     nn = nothing
     ni = nothing
     for i = 1:length(this.vertices)
-        dist = Distance(this, this.vertices[i], x)
+        # trajectory from new point to vertex since stabilize towards goal
+        traj, _ = GenerateTrajectory(this, x, this.vertices[i])
+        dist = Distance(this, traj)
         if dist < min_dist
             min_dist = dist
             nn = this.vertices[i]
@@ -82,55 +123,51 @@ function Nearest(this::RRT, x)
 end
 
 function NewVertex(this::RRT; cur, target)
-    # general_constraints = combine_constraints(static_constraints, dynamic_constraints)
-    vec = target - cur
-    dist = Distance(this, cur, target)
-    vec = vec / dist
-    dist = min(dist, this.max_dist)
-    N = 10
-    new_vert = nothing
-    is_expanded = false
-    for t = 1:N
-        x = cur + vec * dist * (t / N)
-        if isValid(this.world, x)
-            new_vert = x
-            is_expanded = true
-        else
-            break
-        end
+    # vec = target - cur
+    if !isValid(this.world, cur) || !isValid(this.world, target)
+        return nothing, false, nothing, nothing
+    else
+        traj, U = GenerateTrajectory(this, cur, target)
+        dist = Distance(this, traj)
+        capped_dist = min(dist, this.max_dist)
+        t = this.N * capped_dist / dist 
+        # https://stackoverflow.com/questions/40520131/convert-float-to-int-in-julia-lang
+        t = min(this.N-1, max(1, trunc(Int, t)))  # convert to int
+        return traj[t, :], true, traj[1:t, :], U[1:t, :]
     end
-    return new_vert, is_expanded
-
 end
 
-function AddVertex(this::RRT, vert)
-    push!(this.vertices, vert)
+function AddVertex(this::RRT, x)
+    push!(this.vertices, x)
     push!(this.edges, [])
     return length(this.vertices)
 end
 
-function AddEdge(this::RRT, vert1_idx, vert2_idx, dist)
-    push!(this.edges[vert1_idx], (dist, vert2_idx))
-    push!(this.edges[vert2_idx], (dist, vert1_idx))
+function AddEdge(this::RRT, x1_idx, x2_idx, traj, U, dist)
+    push!(this.edges[x1_idx], (dist, x2_idx, traj, U))
+    push!(this.edges[x2_idx], (dist, x1_idx, traj, U))
 end
 
-function gen_trajectory(this::RRT, x1, x2, N)
-    n, m = size(this.model)
-    vec = x2 - x1
-    dist = Distance(this, x2, x1)
-    vec = vec / dist
-    wpts = zeros(2, N + 1)
-    for t = 0:N
-        x = x1 + vec * dist * (t / N)
-        wpts[:, t+1] = x
+function LookupTraj(this::RRT, x1_idx::Integer, x2_idx::Integer)
+    for (_, ni, traj, U) in this.edges[x1_idx]
+        if ni == x2_idx
+            return traj
+        end
     end
-    return wpts
-
 end
 
-function show_trajectory(this::RRT, x1, x2, N_split = 20, c_ = :gray, linewidth_ = 0.5)
-    wpts = gen_trajectory(this, x1, x2, N_split)
-    @views plot(wpts[1, :], wpts[2, :], c = c_, linewidth = linewidth_)
+function show_trajectory(this::RRT, x1::Array{Float64,N}, x2::Array{Float64,N}, c_ = :gray, linewidth_ = 0.5)
+    traj, U = GenerateTrajectory(this, x1, x2)
+    @views plot(traj[:, 1], traj[:, 2], c = c_, linewidth = linewidth_)
+end
+
+function show_trajectory(this::RRT, x1_idx::Integer, x2_idx::Integer, c_ = :gray, linewidth_ = 0.5)
+    traj = LookupTraj(this, x1_idx, x2_idx)
+    @views plot(traj[:, 1], traj[:, 2], c = c_, linewidth = linewidth_)
+end
+
+function show_trajectory(this::RRT, traj::Adjoint{Float64,Array{Float64,2}}, c_ = :gray, linewidth_ = 0.5)
+    @views plot(traj[:, 1], traj[:, 2], c = c_, linewidth = linewidth_)
 end
 
 function Search(this::RRT, max_iters, visualize)
@@ -145,19 +182,21 @@ function Search(this::RRT, max_iters, visualize)
         # so we can just solve optimal traj from cur=x to target=nearest 
         # but for holonomic test version, need to branch from existing
         # to new node and stop when hit obstacle.
-        new_vert, is_expanded = NewVertex(this, cur = nearest, target = x)
+        new_vert, is_expanded, traj, U = NewVertex(this, cur = x, target = nearest)
         if !is_expanded
             continue
         end
         new_vert_idx = AddVertex(this, new_vert)
-        cost = Distance(this, nearest, new_vert)
-        AddEdge(this, nearest_idx, new_vert_idx, cost)
+        cost = Distance(this, traj)
+        AddEdge(this, nearest_idx, new_vert_idx, traj, U, cost)
 
         # Search backwards from goal to start
-        start_dist = Distance(this, new_vert, start)
+        # TODO: WARNING THIS SHOULD BE cur=start, target=new_vert for LQRTree
+        traj_from_start, U_from_start = GenerateTrajectory(this, start, new_vert)
+        start_dist = Distance(this, traj_from_start)
         if start_dist < 2 * this.radius
             start_idx = AddVertex(this, start)
-            AddEdge(this, new_vert_idx, start_idx, start_dist)
+            AddEdge(this, new_vert_idx, start_idx, traj_from_start, U_from_start, start_dist)
             done = true
             break
         end
@@ -197,12 +236,13 @@ function BuildPath(this::RRT)
         push!(closed, cur_idx)
 
         neighbors = this.edges[cur_idx]
-        for (trans_cost, next_idx) in neighbors
+        for (trans_cost, next_idx, _, _) in neighbors
             new_g = cur_g + trans_cost
 
             if get(G, next_idx, nothing) == nothing || new_g < G[next_idx]
                 G[next_idx] = new_g
-                h = Distance(this, this.vertices[next_idx], start)
+                traj, _ = GenerateTrajectory(this, start, this.vertices[next_idx])
+                h = Distance(this, traj)
                 f = new_g + ϵ * h
                 push!(open, (f, next_idx))
                 successor[next_idx] = cur_idx
@@ -215,7 +255,7 @@ function BuildPath(this::RRT)
     # path doesn't include start, ends with goal
     while cur_idx != goal_idx
         cur_idx = successor[cur_idx]
-        push!(path, this.vertices[cur_idx])
+        push!(path, cur_idx)
     end
     return path
 end
@@ -240,8 +280,8 @@ function show(this::RRT)
     #scatter(mat[1, idxset_unvisit], mat[2, idxset_unvisit], c=:orange, s=5)
     for idx = 1:N
         neighbors = this.edges[idx]
-        for (_, next_idx) in neighbors
-            show_trajectory(this, this.vertices[idx], this.vertices[next_idx])
+        for (_, next_idx, _, _) in neighbors
+            show_trajectory(this, idx, next_idx)
         end
     end
 

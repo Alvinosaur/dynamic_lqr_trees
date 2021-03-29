@@ -21,17 +21,17 @@ obstacle_set = [
 
 # define bounds on state space
 state_str = ["x", "y", "vx", "vy"]
-lower_bounds = @SVector [0.0, 0.0] #, -0.5, -0.5]
-upper_bounds = @SVector [1.0, 1.0] #, 0.5, 0.5]
+lower_bounds = @SVector [0.0, 0.0, -0.5, -0.5]
+upper_bounds = @SVector [1.0, 1.0, 0.5, 0.5]
 
 world = World(lower_bounds, upper_bounds, obstacle_set)
 
 
 model = DoubleIntegrator()
-start = @SVector [0.1, 0.1] # , 0.0, 0.0]
-goal = @SVector [0.9, 0.9] #, 0.0, 0.0]
+start = @SVector [0.1, 0.1, 0.0, 0.0]
+goal = @SVector [0.9, 0.9, 0.0, 0.0]
 max_iters = 6000
-visualize = false
+visualize = true
 
 rrt = RRT(start, goal, model, world)
 solved, path = Search(rrt, max_iters, visualize)

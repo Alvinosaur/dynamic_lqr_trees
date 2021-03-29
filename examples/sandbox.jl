@@ -4,6 +4,20 @@ using StaticArrays, LinearAlgebra
 using RobotDynamics
 using PyPlot
 
+# stay in double integrator for now as long as possible
+# only
+
+# DO NOT USE QUADROTOR MODEL IN ROBOTZOO.jl b/c complicated quaternions
+# use as simple as possible quadrotor model  
+# simple nonlinear quadrotor model 
+
+# specify dt = 1 sec for double integrator, N
+# tf is time between those knot points 
+# keep time btwn knot points as small as possible 
+# dt = tf / (N - 1)
+
+# u0 = SVector{2,Float64}([0.0, 0.001] + rand(2) * 0.01)
+# U0 = [u0 for k = 1:N-1]
 
 struct DoubleIntegrator{} <: TrajectoryOptimization.AbstractModel
     A::Any
@@ -45,9 +59,7 @@ n, m = size(model)
 
 N = 50
 tf = 20.0
-
-# u0 = SVector{2,Float64}([0.0, 0.001] + rand(2) * 0.01)
-# U0 = [u0 for k = 1:N-1]
+dt = 0.2
 
 Q = 1.0 * Diagonal(@SVector ones(n))
 Qf = 10.0 * Diagonal(@SVector ones(n))
@@ -59,25 +71,24 @@ x = [0.5, 0.6]
 y = [0.6, 0.4]
 xi = 1
 yi = 2
-circle1 = TrajectoryOptimization.CircleConstraint(model.n, x[1], y[1], r[1], xi, yi)
-# circle2 = TrajectoryOptimization.CircleConstraint(model.n, x[2:2], y[2:2], r[2:2], xi, yi)
+obstacles = TrajectoryOptimization.CircleConstraint(model.n, x, y, r, xi, yi)
 
 conSet = ConstraintList(n, m, N)
+# goal constraint not really necessary since LQR objective already minimizes distance with goal
 # add_constraint!(conSet, GoalConstraint(goal), N:N)
 
-# add_constraint!(conSet, circle2, 1:N)
-add_constraint!(conSet, circle1, 1:N)
+add_constraint!(conSet, obstacles, 1:N)
 
 add_constraint!(
     conSet,
     BoundConstraint(n, m, x_min = lower_bounds, x_max = upper_bounds),
-    1:N-1,
+    1:N-1,  # do not include Nth knot, the terminal since somehow affects controls, which aren't defined at the terminal knot
 )
 
 prob = Problem(model, obj, goal, tf, x0 = start, constraints = conSet)
 
-altro = ALTROSolver(prob)
-@time solve!(altro);
+altro = ALTROSolver(prob);
+solve!(altro);
 X = states(altro)
 U = controls(altro)
 

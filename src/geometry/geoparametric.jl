@@ -2,7 +2,7 @@ using StaticArrays
 # using StaticArrays.ImmutableArrays
 const Vec2f = SVector{2, Float64}
 const Vec4f = SVector{4, Float64}
-@inline @inbounds norm(v) = sqrt(v[1]^2 + v[2]^2)
+# @inline @inbounds norm(v) = sqrt(v[1]^2 + v[2]^2)
 @inline @inbounds inpro(v1, v2) = v1[1]*v2[1]+v1[2]*v2[2]
 
 abstract type GeoParametric end

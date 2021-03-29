@@ -32,4 +32,5 @@ function RobotDynamics.dynamics(model::DoubleIntegrator, x, u)
 end
 
 Base.size(::DoubleIntegrator) = 4, 2
-
+RobotDynamics.state_dim(model::DoubleIntegrator) = 4
+RobotDynamics.control_dim(model::DoubleIntegrator) = 2

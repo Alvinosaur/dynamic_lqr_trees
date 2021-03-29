@@ -53,35 +53,20 @@ function show(this::World)
     end
 end
 
-# custom function signature for TrajectoryOptimization package
-function combine_constraints(cons1::ConstraintList, cons2::ConstraintList)
-    @assert check_dims(cons2, cons1.n, cons1.m) "2nd constraints list not consistent with 1st list n=$(cons1.n) and m=$(cons1.m)"
 
-    N1 = length(cons1.p)  # holds true num of constraints, even if not added yet
-    N2 = length(cons2.p)
-    new_cons = constraints = ConstraintList(cons1.n, cons1.m, N1 + N2)
-    for i = 1:N1
-        add_constraint!(new_cons, cons1.constraints[i], i)
-    end
-
-    for j = 1:N2
-        add_constraint!(new_cons, cons2.constraints[j], j + N1)
-    end
-    return new_cons
-end
-
-
-function gen_static_constraints(this::World, model)
+function gen_static_constraints(this::World, model, N)
     # NOTE: This only works with circular constraints 
-    constraints = ConstraintList(model.n, model.m, length(world.Pset))
+    constraints = ConstraintList(model.n, model.m, N)
     for i = 1:length(this.Pset)
-        xc = SA[this.Pset[i].c[1]]
-        yc = SA[this.Pset[i].c[2]]
-        radius = SA[this.Pset[i].r]
+        xc = this.Pset[i].c[1]
+        yc = this.Pset[i].c[2]
+        radius = this.Pset[i].r
         xi = 1  # index into state vector to get x
         yi = 2  # index into state vector to get y
-        con = CircleConstraint(model.n, xc, yc, radius, xi, yi)
-        add_constraint!(constraints, con, i)
+        con = CircleConstraint(model.n, [xc], [yc], [radius], xi, yi)
+        
+        # add constraint to all N knot points
+        add_constraint!(constraints, con, 1:N)
     end
     return constraints
 end
