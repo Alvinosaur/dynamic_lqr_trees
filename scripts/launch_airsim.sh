@@ -1,0 +1,1 @@
+bash /home/alvin/drone_ws/src/AirSim/Blocks/LinuxNoEditor/Blocks.sh -WINDOWED -ResX=640 -ResY=480 --settings /home/alvin/research/dynamic_lqr_trees/airsim_settings.json
