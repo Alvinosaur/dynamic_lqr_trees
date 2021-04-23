@@ -60,10 +60,12 @@ function gen_static_constraints(this::World, model, N)
     for i = 1:length(this.Pset)
         xc = this.Pset[i].c[1]
         yc = this.Pset[i].c[2]
+        zc = this.Pset[i].c[3]
         radius = this.Pset[i].r
         xi = 1  # index into state vector to get x
         yi = 2  # index into state vector to get y
-        con = CircleConstraint(model.n, [xc], [yc], [radius], xi, yi)
+        zi = 3
+        con = SphereConstraint(model.n, [xc], [yc], [zc], [radius], xi, yi, zi)
         
         # add constraint to all N knot points
         add_constraint!(constraints, con, 1:N)

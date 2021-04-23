@@ -8,7 +8,7 @@ const Vec4f = SVector{4, Float64}
 abstract type GeoParametric end
 
 struct Sphere <: GeoParametric
-    c::SVector{2, Float64}
+    c::SVector{3, Float64}
     r::Float64
 end
 
@@ -38,7 +38,7 @@ end
 
 function show(this::Sphere, color=:red)
     for theta in 0:0.3:2π
-        x = this.c + this.r*Vec2f(cos(theta), sin(theta))
+        x = this.c[1:2] + this.r*Vec2f(cos(theta), sin(theta))
         scatter(x[1], x[2], c=color)
     end
 end

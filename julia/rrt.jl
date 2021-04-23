@@ -5,7 +5,7 @@ using LinearAlgebra
 using TrajectoryOptimization
 using Altro
 const TO = TrajectoryOptimization
-
+# include("world.jl")
 mutable struct RRT
     start::Any
     goal::Any
@@ -103,6 +103,10 @@ function Distance(this::RRT, traj)
     return piecewise_dist
 end
 
+function EuclideanDistance(this::RRT, x1, x2)
+    return norm(x1 - x2)
+end
+
 
 
 function Nearest(this::RRT, x)
@@ -111,8 +115,8 @@ function Nearest(this::RRT, x)
     ni = nothing
     for i = 1:length(this.vertices)
         # trajectory from new point to vertex since stabilize towards goal
-        traj, _ = GenerateTrajectory(this, x, this.vertices[i])
-        dist = Distance(this, traj)
+        # traj, _ = GenerateTrajectory(this, x, this.vertices[i])
+        dist = EuclideanDistance(this, x, this.vertices[i])
         if dist < min_dist
             min_dist = dist
             nn = this.vertices[i]
@@ -128,12 +132,17 @@ function NewVertex(this::RRT; cur, target)
         return nothing, false, nothing, nothing
     else
         traj, U = GenerateTrajectory(this, cur, target)
-        dist = Distance(this, traj)
-        capped_dist = min(dist, this.max_dist)
-        t = this.N * capped_dist / dist 
-        # https://stackoverflow.com/questions/40520131/convert-float-to-int-in-julia-lang
-        t = min(this.N-1, max(1, trunc(Int, t)))  # convert to int
-        return traj[t, :], true, traj[1:t, :], U[1:t, :]
+        return traj[1, :], true, traj, U
+        # dist = Distance(this, traj)
+        # capped_dist = min(dist, this.max_dist)
+        # t = this.N * capped_dist / dist 
+        # # https://stackoverflow.com/questions/40520131/convert-float-to-int-in-julia-lang
+        # t = min(this.N-1, max(1, trunc(Int, t)))  # convert to int
+        # println("Current: ", cur)
+        # println("Target: ", target)
+        # println("next: ", traj[t, :])
+        # println("traj: ", traj[1:t, :])
+        # return traj[t, :], true, traj[1:t, :], U[1:t, :]
     end
 end
 
@@ -156,7 +165,7 @@ function LookupTraj(this::RRT, x1_idx::Integer, x2_idx::Integer)
     end
 end
 
-function show_trajectory(this::RRT, x1::Array{Float64,N}, x2::Array{Float64,N}, c_ = :gray, linewidth_ = 0.5)
+function show_trajectory(this::RRT, x1::Array{Float64}, x2::Array{Float64}, c_ = :gray, linewidth_ = 0.5)
     traj, U = GenerateTrajectory(this, x1, x2)
     @views plot(traj[:, 1], traj[:, 2], c = c_, linewidth = linewidth_)
 end
@@ -190,6 +199,12 @@ function Search(this::RRT, max_iters, visualize)
         cost = Distance(this, traj)
         AddEdge(this, nearest_idx, new_vert_idx, traj, U, cost)
 
+        if visualize
+            close()
+            show(this)
+            savefig("fig/" * string(iter) * ".png")
+        end
+
         # Search backwards from goal to start
         # TODO: WARNING THIS SHOULD BE cur=start, target=new_vert for LQRTree
         traj_from_start, U_from_start = GenerateTrajectory(this, start, new_vert)
@@ -203,12 +218,6 @@ function Search(this::RRT, max_iters, visualize)
 
         if iter >= max_iters
             break
-        end
-
-        if visualize
-            close()
-            show(this)
-            savefig("fig/" * string(iter) * ".png")
         end
     end
     return done, BuildPath(this)
@@ -250,9 +259,8 @@ function BuildPath(this::RRT)
         end
     end
 
-    path = []
+    path = [start_idx]
     cur_idx = start_idx
-    # path doesn't include start, ends with goal
     while cur_idx != goal_idx
         cur_idx = successor[cur_idx]
         push!(path, cur_idx)
@@ -275,6 +283,7 @@ function show(this::RRT)
     # idxset_tree = setdiff(union(idxset_open, idxset_closed), [1])
     scatter(mat[1, 1], mat[2, 1], c = :blue, s = 10, zorder = 100)
     scatter(mat[1, end], mat[2, end], c = :blue, s = 10, zorder = 101)
+    println(mat[:, end])
     scatter(mat[1, 2:end], mat[2, 2:end], c = :gray, s = 2)
     scatter(mat[1, 2:end], mat[2, 2:end], c = :gray, s = 2)
     #scatter(mat[1, idxset_unvisit], mat[2, idxset_unvisit], c=:orange, s=5)

@@ -5,19 +5,12 @@ from mavros_msgs.srv import CommandBool, CommandTOL, SetMode
 from geometry_msgs.msg import PoseStamped, TwistStamped, Vector3
 from nav_msgs.msg import Path
 from gazebo_msgs.msg import ModelState
-from sensor_msgs.msg import Imu, NavSatFix
-from std_msgs.msg import Float32, Float64, String, Header
-# import tf_conversions
-# import tf2_ros
 
 import time
-from pyquaternion import Quaternion
-from scipy.spatial.transform import Rotation
-import math
 import numpy as np
-import threading
-from simple_pid import PID
 from scipy.interpolate import interp1d
+
+import utils
 
 
 class Spline3D(object):
@@ -33,9 +26,11 @@ class Spline3D(object):
 
 class SimDynamicObstacles:
     def __init__(self):
+        self.dt = 0.1
         self.T_complete = 7  # seconds for each obstacle to complete one pass
-        N = 3  # num obstacles
-        self.N = N
+        self.T_pred = 1  # output ground truth path duration in seconds
+        num_obs = 3  # num obstacles
+        self.num_obs = num_obs
         self.min_pts = 10
         self.max_pts = 20
         self.t0 = time.time()
@@ -54,15 +49,10 @@ class SimDynamicObstacles:
             [7, -5, 3]
         ])
 
-        self.splines = [self.gen_random_traj(self.starts[i], self.goals[i]) for i in range(N)]
-
-        self.obstacle_pose_pub = rospy.Publisher('/gazebo/set_model_state', ModelState, queue_size=10 * N)
-
-        '''
-        ros services
-        '''
-        self.armService = rospy.ServiceProxy('/mavros/cmd/arming', CommandBool)
-        self.flightModeService = rospy.ServiceProxy('/mavros/set_mode', SetMode)
+        self.splines = [self.gen_random_traj(self.starts[i], self.goals[i]) for i in range(num_obs)]
+        self.obstacle_pose_pub = rospy.Publisher('/gazebo/set_model_state', ModelState, queue_size=10 * num_obs)
+        self.obstacle_path_pubs = [
+            rospy.Publisher(f'/dynamic_lqr_trees/obs_path_{i}', Path, queue_size=10) for i in range(num_obs)]
 
     def reset_t0(self, t0):
         self.t0 = t0
@@ -93,8 +83,18 @@ class SimDynamicObstacles:
     def publish_obstacles(self, t):
         # index into tuple of (original, reversed)
         pair_idx = 0 if not self.reversed else 1
-        for i in range(self.N):
-            x, y, z = self.splines[i][pair_idx](t - self.t0)
+
+        # visualizing ground truth trajectory
+        t_cur = t - self.t0
+        t_final = t_cur + self.T_pred
+        t_forward = np.arange(start=t_cur, stop=min(t_final, self.T_complete), step=self.dt)
+        if t_final > self.T_complete:
+            t_rev = np.arange(start=self.T_complete, stop=t_final, step=self.dt) - self.T_complete
+        else:
+            t_rev = None
+
+        for i in range(self.num_obs):
+            x, y, z = self.splines[i][pair_idx](t_cur)
             new_pos = ModelState()
             new_pos.reference_frame = "world"
             new_pos.model_name = "obstacle%d" % i
@@ -102,6 +102,16 @@ class SimDynamicObstacles:
             new_pos.pose.position.y = y
             new_pos.pose.position.z = z
             self.obstacle_pose_pub.publish(new_pos)
+
+            # publish ground truth path
+            x_path, y_path, z_path = self.splines[i][pair_idx](t_forward)
+            if t_rev is not None:
+                rev_path = self.splines[i][1 - pair_idx](t_rev)
+                x_path = np.concatenate([x_path, rev_path[0]])
+                y_path = np.concatenate([y_path, rev_path[1]])
+                z_path = np.concatenate([z_path, rev_path[2]])
+            full_path = np.vstack([x_path, y_path, z_path]).T
+            self.obstacle_path_pubs[i].publish(utils.create_path(traj=full_path, dt=self.dt))
 
 
 if __name__ == '__main__':
