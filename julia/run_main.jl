@@ -21,8 +21,8 @@ obstacle_set = [
 
 # define bounds on state space
 state_str = ["x", "y", "vx", "vy"]
-lower_bounds = @SVector [0.0, 0.0, -0.5, -0.5]
-upper_bounds = @SVector [1.0, 1.0, 0.5, 0.5]
+lower_bounds = @SVector [0.0, 0.0, -1, -1]
+upper_bounds = @SVector [1.0, 1.0, 1, 1]
 
 world = World(lower_bounds, upper_bounds, obstacle_set)
 
@@ -38,12 +38,9 @@ solved, path = Search(rrt, max_iters, visualize)
 
 if solved
     show(rrt)
-    local prev = start
-    for next in path
-        show_trajectory(rrt, prev, next, 20, :blue, 1.5)
-        prev = next
+    for i=2:length(path)
+        show_trajectory(rrt, path[i-1], path[i], :blue, 1.5)
     end
-    show_trajectory(rrt, prev, goal, 20, :blue, 1.5)
 else
     print("Failed to solve!")
 end
