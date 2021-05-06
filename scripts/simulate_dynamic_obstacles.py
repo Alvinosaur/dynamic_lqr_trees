@@ -43,17 +43,17 @@ class SimDynamicObstacles:
         self.obs_radii = [0.3, 0.6, 0.7, 0.5]
 
         self.starts = np.array([
-            [2, 0, 3],
-            [4, 4, 4],
-            [6, 2, 2],
-            [8, 1, 3]
+            [2, -2, 4],
+            [6, -1, 3],
+            [4, 1.5, 5],
+            [8, 0, 3]
         ])
 
         self.goals = np.array([
-            [2, 0, 3],
-            [4, 4, 4],
-            [6, 2, 2],
-            [8, 1, 3]
+            [4, 2, 2],
+            [6, 1, 3],
+            [2, -1.5, 2],
+            [8, 0, 3]
         ])
 
         self.splines = [self.gen_random_traj(self.starts[i], self.goals[i]) for i in range(num_obs)]

@@ -17,8 +17,52 @@ class ClosedLoopRRT(object):
         self.space_dim = space_dim
         self.dist_tol = dist_tol
         self.model = DroneDynamics(N, dt)
+        self.trajectory = None
+
+    def reuse_valid(self, x0, obstacles):
+        if self.trajectory is None:
+            return False, False
+
+        # find nearest point in trajectory
+        distances = np.linalg.norm(self.trajectory[:, :self.space_dim] - x0[np.newaxis, :self.space_dim], axis=1)
+        nearest_idx = np.argmin(distances)
+
+        # # solve for trajectory to this new target and check for collisions
+        # interm_traj = self.model.rollout_with_time(x0=x0, xg=self.trajectory[nearest_idx, :])
+        # valid_samples, _ = self.filter_samples(interm_traj, obstacles)
+        # if len(valid_samples) == 0:
+        #     print("Collide with nearest state!")
+        #     return False
+        #
+        # # check if old trajectory reachable
+        # last_valid_idx = valid_samples[-1][1]
+        # interm_distances = np.linalg.norm(
+        #     interm_traj[:last_valid_idx, :self.space_dim] - x0[np.newaxis, :self.space_dim], axis=1)
+        # close_idxs = np.where(interm_distances < self.dist_tol)[0]
+        # if len(close_idxs) == 0:
+        #     print("Doesn't reach nearest state!")
+        #     return False
+
+        # check if the rest of the trajectory is safe
+        self.trajectory = self.trajectory[nearest_idx:]
+        # # self.trajectory = np.vstack([interm_traj[:close_idxs[0]], ])  # update new trajectory
+        self.trajectory[:, -1] -= self.trajectory[0, -1]  # update time so first state has 0 time
+        _, has_collision = self.filter_samples(self.trajectory, obstacles)
+        if has_collision:
+            print("Rest of path has collision!")
+            return False, False
+        else:
+            plan_changed = nearest_idx > 2
+            return True, plan_changed
 
     def replan(self, x0, xg, obstacles, with_time=False):
+        # Try reusing pre-existing plan if available
+        # destructively modifies old waypoints and traj pieces
+        is_valid, plan_changed = self.reuse_valid(x0, obstacles)
+        if is_valid:
+            print("Plan: %d" % plan_changed)
+            return plan_changed
+
         state_dim = len(x0)
         found_path = False
         goali = None
@@ -39,7 +83,7 @@ class ClosedLoopRRT(object):
 
             # generate LQR-based trajectory filtered to avoid obstacles
             traj = self.model.rollout_with_time(x0=nodes[nearesti], xg=new_x)
-            valid_samples = self.filter_samples(traj, obstacles)
+            valid_samples, _ = self.filter_samples(traj, obstacles)
 
             # Debug
             # stepsize = max(1, int(len(traj) / num_steps))
@@ -53,7 +97,7 @@ class ClosedLoopRRT(object):
 
                 # try connecting to goal too
                 traj_to_goal = self.model.rollout_with_time(s, xg)
-                valid_samples_goal = self.filter_samples(traj_to_goal, obstacles)
+                valid_samples_goal, _ = self.filter_samples(traj_to_goal, obstacles)
 
                 # Debug
                 # stepsize = max(1, int(len(traj_to_goal) / num_steps))
@@ -74,29 +118,22 @@ class ClosedLoopRRT(object):
 
         # Build full path from start to goal if exists
         if found_path:
-            waypoints = []
             traj_pieces = []
             curi = goali
             while curi != starti:
                 state = nodes[curi]
                 traj_to_state = parent[curi][1]
-
-                if with_time:
-                    waypoints.append(state)
-                    traj_pieces.append(traj_to_state)
-                else:
-                    waypoints.append(state[:-1])
-                    traj_pieces.append(traj_to_state[:, :-1])
-
+                traj_pieces.append(traj_to_state)
                 curi = parent[curi][0]
 
-            if with_time:
-                waypoints.append(x0)
-            else:
-                waypoints.append(x0[:-1])
-            waypoints.reverse()
             traj_pieces.reverse()
-            return waypoints, traj_pieces
+            self.trajectory = np.vstack(traj_pieces)
+
+            plan_changed = True
+            return plan_changed
+
+        else:
+            raise (Exception("Failed to find a plan???"))
 
     def filter_samples(self, traj, obstacles):
         distances = np.linalg.norm(
@@ -104,6 +141,7 @@ class ClosedLoopRRT(object):
             axis=1)
         distances = np.cumsum(distances)
 
+        has_collision = False
         valid_samples = []
         si = 0
         while si < len(traj) - 1:
@@ -120,6 +158,7 @@ class ClosedLoopRRT(object):
                 t = traj[si, -1]
                 if obs.is_intersect(pos, self.radius, t):
                     sample_valid = False
+                    has_collision = True
                     break
 
             if sample_valid:
@@ -127,7 +166,7 @@ class ClosedLoopRRT(object):
             else:
                 break
 
-        return valid_samples
+        return valid_samples, has_collision
 
     @staticmethod
     def rotation_matrix_from_vectors(vec1, vec2):

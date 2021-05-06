@@ -35,13 +35,15 @@ class Px4Controller:
         self.solver_thread = None
         self.Gff = np.array([0, 0, 9.8, 0])
         self.time_to_solve = 3
+        self.path_index = 0
 
         # Takeoff
         self.x0 = np.array([0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         self.xg = np.array([10.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         self.yaw_index = len(self.x0) - 2  # 2nd to last value
 
-        self.obs_radii = [0.3, 0.6, 0.7, 0.5]
+        self.padding = 0.1
+        self.obs_radii = np.array([0.3, 0.6, 0.7, 0.5]) + self.padding
         self.num_obs = len(self.obs_radii)
         self.obstacles = [
             ObstacleBicycle(T=self.T, r=self.obs_radii[i], vmax=1,
@@ -59,7 +61,6 @@ class Px4Controller:
         self.X_mpc = None
         self.U_mpc = None
         self.solved = False
-        self.waypoints, self.piecewise_trajs = None, None
 
         # Attitude message
         self.att = AttitudeTarget()
@@ -169,10 +170,10 @@ class Px4Controller:
         ])
 
         start_time = time.time()
-        collision_sampling_count = 20  # number of samples for collision checks
-        self.waypoints, self.piecewise_trajs = self.planner.replan(
+        plan_changed = self.planner.replan(
             x, self.xg, obstacles=self.obstacles)
-        self.piecewise_trajs = np.vstack(self.piecewise_trajs)
+        if plan_changed:
+            self.path_index = 0
 
         # execute next step
         # TODO: this might need to be rollout_with_time if waypoints
@@ -182,27 +183,31 @@ class Px4Controller:
         self.time_to_solve = end_time - start_time
 
         print("Finished solving in time %.3f" % (end_time - start_time))
-        self.t_solved = time.time() + self.t_offset
+        self.t_solved = time.time()
         self.solved = True
 
-    def use_prev_traj(self, path_index):
-        x, y, z = self.piecewise_trajs[path_index, :3]
+    def use_prev_traj(self):
+        try:
+            path_index = min(self.path_index, len(self.planner.trajectory)-1)
+            x, y, z = self.planner.trajectory[path_index, :3]
+            yaw = self.planner.trajectory[path_index, self.yaw_index] % (2 * math.pi)
+        except IndexError:
+            # This is a race condition where thread finishes and changes planner.trajectory after we measure its length
+            # update path index again
+            path_index = min(self.path_index, len(self.planner.trajectory)-1)
+            x, y, z = self.planner.trajectory[path_index, :3]
+            yaw = self.planner.trajectory[path_index, self.yaw_index] % (2 * math.pi)
+
+        print(path_index)
         # thrust, phi, theta, psi = self.drone_mpc.inverse_dyn(q=self.local_q, x_ref=self.X_mpc[1], u=self.U_mpc[path_index])
-        yaw = self.piecewise_trajs[path_index, self.yaw_index] % (2 * math.pi)
+
         target_q = Rotation.from_euler("XYZ", [0, 0, yaw]).as_quat()
         pose_msg = self.construct_pose_target(x=x, y=y, z=z, q=target_q)
 
         return pose_msg
 
     def reached_target(self, cur_p, target_p, threshold=0.1):
-        delta_x = math.fabs(cur_p.pose.position.x - target_p.position.x)
-        delta_y = math.fabs(cur_p.pose.position.y - target_p.position.y)
-        delta_z = math.fabs(cur_p.pose.position.z - target_p.position.z)
-
-        if (delta_x + delta_y + delta_z < threshold):
-            return True
-        else:
-            return False
+        return np.linalg.norm(cur_p - target_p) < threshold
 
     def obstacle_path_cb(self, msg, i):
         traj = [[p.pose.position.x, p.pose.position.y, p.pose.position.z] for p in msg.poses]
@@ -245,7 +250,7 @@ class Px4Controller:
                         self.local_pose.pose.position.y,
                         self.local_pose.pose.position.z])
         dist = np.linalg.norm(cur - self.x0[:3])
-        return dist < 0.3 and self.arm_state
+        return dist < 0.5 and self.arm_state
 
     def start(self):
         if not self.check_connection():
@@ -265,23 +270,32 @@ class Px4Controller:
             # takeoff_pos = self.construct_pose_target(x=0, y=0, z=self.takeoff_height, q=self.takeoff_q)
             # count = 0
             # self.pos_control_pub.publish(takeoff_pos)
+
+            cur_p = np.array([
+                self.local_pose.pose.position.x,
+                self.local_pose.pose.position.y,
+                self.local_pose.pose.position.z
+            ])
+            if self.reached_target(cur_p, target_p=self.xg[:3], threshold=0.3):
+                print("Reached Target!")
+                break
+
             if self.mavros_state == State.MODE_PX4_OFFBOARD:
                 time_since_solved = time.time() - self.t_solved
-                if (self.solver_thread is None or not self.solver_thread.is_alive()):
+                # need_new_plan = time_since_solved > self.T
+                need_new_plan = True
+                if self.solver_thread is None or (not self.solver_thread.is_alive() and need_new_plan):
                     print("Generating action!")
                     # Spawn a process to run this independently:
                     self.solver_thread = threading.Thread(target=self.generate_action)
                     self.solver_thread.start()
 
-                path_index = int(((time.time() - self.t_solved) / self.dt))
-                path_index = min(max(0, path_index), self.N - 1)
-                print("Path index: %d" % path_index)
                 if not self.solved:
-                    print("Staying at origin!")
+                    # print("Staying at origin!")
                     desired_pos = self.construct_pose_target(x=self.x0[0], y=self.x0[1], z=self.x0[2])
                     self.pos_control_pub.publish(desired_pos)
                 else:
-                    print("Using prev path!")
+                    # print("Using prev path!")
                     # if self.version == 1:
                     #     u = self.U_mpc[path_index] + self.Gff
                     #     x = self.X_mpc[path_index]
@@ -289,11 +303,12 @@ class Px4Controller:
                     #     target_q = Rotation.from_euler("XYZ", [phid, thetad, psid]).as_quat()
                     #     self.control_attitude(target_q=target_q, thrust=thrust)
                     # else:
+                    self.pos_control_pub.publish(self.use_prev_traj())
+                    self.path_index += 1
 
-                    self.pos_control_pub.publish(self.use_prev_traj(path_index))
-
-                if self.piecewise_trajs is not None:
-                    self.output_path_pub.publish(utils.create_path(traj=self.piecewise_trajs, dt=self.dt, frame="world"))
+                if self.planner.trajectory is not None:
+                    self.output_path_pub.publish(
+                        utils.create_path(traj=self.planner.trajectory, dt=self.dt, frame="world"))
 
             try:  # prevent garbage in console output when thread is killed
                 rate.sleep()

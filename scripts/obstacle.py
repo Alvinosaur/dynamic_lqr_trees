@@ -14,6 +14,8 @@ class ObstacleBicycle(object):
         self.T = T
         self.dt = dt
         self.N = int(T / dt)
+        self.stationary_tol = 0.1
+        self.vmax = vmax
 
         # reachable set
         steer_angles_psi = np.linspace(-max_steer_psi, max_steer_psi, num_angles)
@@ -26,9 +28,17 @@ class ObstacleBicycle(object):
                 self.reachable_trajs.append(traj[np.newaxis, :])
         self.reachable_trajs = np.vstack(self.reachable_trajs)
 
-    def calc_reachable_endpoints(self, pos, yaw, pitch):
+    def calc_reachable_endpoints(self, pos, yaw, pitch, velocity):
+        if velocity < self.stationary_tol:
+            return None
+
+        # scale predicted reachable set down if velocity < vmax
+        # this assumes vmax reachable set is a superset of any lower velocity's set
+        velocity = min(self.vmax, velocity)
+        idx = np.rint((self.N - 1) * velocity / self.vmax)
+
         # apply translation and rotation
-        endpoints = self.reachable_trajs[:, -1, :self.space_dim]  # don't include theta in positions
+        endpoints = self.reachable_trajs[:, idx, :self.space_dim]  # don't include theta in positions
         rot = Rotation.from_euler("XYZ", [pitch, 0, yaw]).as_matrix()
         endpoints = (rot @ endpoints.T).T + pos[np.newaxis, :]
         return endpoints
@@ -83,21 +93,27 @@ class ObstacleBicycle(object):
         else:
             vec = self.traj[ti + 1, :self.space_dim] - self.traj[ti, :self.space_dim]
 
+        velocity = np.linalg.norm(vec)
+
         yaw = math.atan2(vec[1], vec[0])
         pitch = math.atan2(vec[2], vec[0])
 
-        endpoints = self.calc_reachable_endpoints(obs_pos, yaw, pitch)
+        endpoints = self.calc_reachable_endpoints(obs_pos, yaw, pitch, velocity)
+        if endpoints is not None:
+            # AABB collision check: https://developer.mozilla.org/en-US/docs/Games/Techniques/3D_collision_detection
+            min_corners, max_corners = self.bounding_box_from_points(np.vstack([endpoints, obs_pos[np.newaxis, :]]))
+            minx, miny, minz = min_corners
+            maxx, maxy, maxz = max_corners
 
-        # AABB collision check: https://developer.mozilla.org/en-US/docs/Games/Techniques/3D_collision_detection
-        min_corners, max_corners = self.bounding_box_from_points(np.vstack([endpoints, obs_pos[np.newaxis, :]]))
-        minx, miny, minz = min_corners
-        maxx, maxy, maxz = max_corners
-        cx, cy, cz = other_pos
+            cx, cy, cz = other_pos
 
-        # find closest point to sphere
-        nearest_x = max(minx, min(cx, maxx))
-        nearest_y = max(miny, min(cy, maxy))
-        nearest_z = max(minz, min(cz, maxz))
+            # find closest point to sphere
+            nearest_x = max(minx, min(cx, maxx))
+            nearest_y = max(miny, min(cy, maxy))
+            nearest_z = max(minz, min(cz, maxz))
+
+        else:
+            nearest_x, nearest_y, nearest_z = obs_pos
 
         sq_dist = np.sum((np.array([nearest_x, nearest_y, nearest_z]) - other_pos) ** 2)
         if debug:
