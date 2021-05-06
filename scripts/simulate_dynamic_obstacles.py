@@ -5,7 +5,7 @@ from mavros_msgs.srv import CommandBool, CommandTOL, SetMode
 from geometry_msgs.msg import PoseStamped, TwistStamped, Vector3
 from nav_msgs.msg import Path
 from gazebo_msgs.msg import ModelState
-
+from visualization_msgs.msg import MarkerArray, Marker
 import time
 import numpy as np
 from scipy.interpolate import interp1d
@@ -21,7 +21,11 @@ class Spline3D(object):
         self.t0 = time.time()
 
     def __call__(self, t):
-        return self.xs(t), self.ys(t), self.zs(t)
+        try:
+            return self.xs(t), self.ys(t), self.zs(t)
+        except:
+            import ipdb
+            ipdb.set_trace()
 
 
 class SimDynamicObstacles:
@@ -29,28 +33,32 @@ class SimDynamicObstacles:
         self.dt = 0.1
         self.T_complete = 7  # seconds for each obstacle to complete one pass
         self.T_pred = 1  # output ground truth path duration in seconds
-        num_obs = 3  # num obstacles
+        num_obs = 4  # num obstacles
         self.num_obs = num_obs
         self.min_pts = 10
         self.max_pts = 20
         self.t0 = time.time()
         self.reversed = False
         self.noise = 0
+        self.obs_radii = [0.3, 0.6, 0.7, 0.5]
 
         self.starts = np.array([
-            [2, 4, 3],
-            [4, 3, 4],
-            [7, 6, 2]
+            [2, 0, 3],
+            [4, 4, 4],
+            [6, 2, 2],
+            [8, 1, 3]
         ])
 
         self.goals = np.array([
-            [3, -3, 4],
-            [2, -4, 2],
-            [7, -5, 3]
+            [2, 0, 3],
+            [4, 4, 4],
+            [6, 2, 2],
+            [8, 1, 3]
         ])
 
         self.splines = [self.gen_random_traj(self.starts[i], self.goals[i]) for i in range(num_obs)]
         self.obstacle_pose_pub = rospy.Publisher('/gazebo/set_model_state', ModelState, queue_size=10 * num_obs)
+        self.obstacle_marker_pub = rospy.Publisher('/dynamic_lqr_trees/obstacle_markers', MarkerArray, queue_size=10)
         self.obstacle_path_pubs = [
             rospy.Publisher(f'/dynamic_lqr_trees/obs_path_{i}', Path, queue_size=10) for i in range(num_obs)]
 
@@ -93,6 +101,8 @@ class SimDynamicObstacles:
         else:
             t_rev = None
 
+        marker_array_msg = MarkerArray()
+
         for i in range(self.num_obs):
             x, y, z = self.splines[i][pair_idx](t_cur)
             new_pos = ModelState()
@@ -102,6 +112,25 @@ class SimDynamicObstacles:
             new_pos.pose.position.y = y
             new_pos.pose.position.z = z
             self.obstacle_pose_pub.publish(new_pos)
+
+            # visualize obstacle in Rviz
+            marker = Marker()
+            marker.header.frame_id = "world"
+            marker.id = i
+            marker.type = marker.SPHERE
+            marker.action = 0
+            marker.pose.position.x = x
+            marker.pose.position.y = y
+            marker.pose.position.z = z
+            marker.color.r = 1.0
+            marker.color.g = 0.0
+            marker.color.b = 0.0
+            marker.color.a = 1.0
+            marker.scale.x = self.obs_radii[i]
+            marker.scale.y = self.obs_radii[i]
+            marker.scale.z = self.obs_radii[i]
+            marker.ns = "obstacle"
+            marker_array_msg.markers.append(marker)
 
             # publish ground truth path
             x_path, y_path, z_path = self.splines[i][pair_idx](t_forward)
@@ -113,6 +142,8 @@ class SimDynamicObstacles:
             full_path = np.vstack([x_path, y_path, z_path]).T
             self.obstacle_path_pubs[i].publish(utils.create_path(traj=full_path, dt=self.dt))
 
+        self.obstacle_marker_pub.publish(marker_array_msg)
+
 
 if __name__ == '__main__':
     # seed for reproducibility
@@ -121,13 +152,10 @@ if __name__ == '__main__':
     rospy.init_node("sim_dynamic_obstacles")
     rate = rospy.Rate(hz=20)
     obstacle_sim = SimDynamicObstacles()
-
-    t0 = time.time()
     while not rospy.is_shutdown():
         t = time.time()
-        if (t - t0) >= obstacle_sim.T_complete:
-            t0 = t
-            obstacle_sim.reset_t0(t0)
+        if (t - obstacle_sim.t0) >= obstacle_sim.T_complete:
+            obstacle_sim.reset_t0(t)
 
         obstacle_sim.publish_obstacles(t)
 

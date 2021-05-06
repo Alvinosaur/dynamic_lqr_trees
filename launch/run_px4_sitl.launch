@@ -15,4 +15,5 @@
 
 	<node pkg="rviz" type="rviz" name="rviz"  args="-d $(find dynamic_lqr_trees)/rviz/main.rviz" />
 	<node pkg="dynamic_lqr_trees" type="tf_broadcaster" name="tf_broadcaster_node"/>
+	<node pkg="dynamic_lqr_trees" type="simulate_dynamic_obstacles.py" name="sim_obstacles_node"/>
 </launch>
