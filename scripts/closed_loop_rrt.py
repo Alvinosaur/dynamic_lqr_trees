@@ -1,23 +1,21 @@
 import numpy as np
-import scipy.linalg
-from scipy.spatial.transform import Rotation
-import matplotlib.pyplot as plt
-import math
+import threading
 
 from obstacle import ObstacleBicycle
 from dynamics import DroneDynamics
 
 
 class ClosedLoopRRT(object):
-    def __init__(self, N, dt, radius, space_dim, dist_tol, ds=None):
+    def __init__(self, A, B, Q, R, S, N, dt, radius, space_dim, dist_tol, ds=None):
         self.radius = radius
         if ds is None:
             ds = 2 * self.radius
         self.ds = ds  # sampling granularity as distance
         self.space_dim = space_dim
         self.dist_tol = dist_tol
-        self.model = DroneDynamics(N, dt)
+        self.model = DroneDynamics(A, B, Q=Q, R=R, S=S, N=N, dt=dt)
         self.trajectory = None
+        self.lock = threading.Lock()
 
     def reuse_valid(self, x0, obstacles):
         if self.trajectory is None:
@@ -44,24 +42,27 @@ class ClosedLoopRRT(object):
         #     return False
 
         # check if the rest of the trajectory is safe
-        self.trajectory = self.trajectory[nearest_idx:]
+        trajectory = np.copy(self.trajectory[nearest_idx:])
         # # self.trajectory = np.vstack([interm_traj[:close_idxs[0]], ])  # update new trajectory
-        self.trajectory[:, -1] -= self.trajectory[0, -1]  # update time so first state has 0 time
-        _, has_collision = self.filter_samples(self.trajectory, obstacles)
+        trajectory[:, -1] -= trajectory[0, -1]  # update time so first state has 0 time
+        _, has_collision = self.filter_samples(trajectory, obstacles)
         if has_collision:
             print("Rest of path has collision!")
-            return False, False
+            return False, False, None
         else:
             plan_changed = nearest_idx > 2
-            return True, plan_changed
+            return True, plan_changed, trajectory
 
     def replan(self, x0, xg, obstacles, with_time=False, replan=True):
         # Try reusing pre-existing plan if available
         # destructively modifies old waypoints and traj pieces
         if replan:
-            is_valid, plan_changed = self.reuse_valid(x0, obstacles)
+            is_valid, plan_changed, trajectory = self.reuse_valid(x0, obstacles)
             if is_valid:
                 print("Plan: %d" % plan_changed)
+                self.lock.acquire()
+                self.trajectory = trajectory
+                self.lock.release()
                 return plan_changed
 
         state_dim = len(x0)
@@ -128,7 +129,9 @@ class ClosedLoopRRT(object):
                 curi = parent[curi][0]
 
             traj_pieces.reverse()
+            self.lock.acquire()
             self.trajectory = np.vstack(traj_pieces)
+            self.lock.release()
 
             plan_changed = True
             return plan_changed

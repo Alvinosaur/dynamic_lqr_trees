@@ -13,6 +13,8 @@ from scipy.spatial.transform import Rotation
 import math
 import numpy as np
 
+from inverseDyn import inverse_dyn
+from drone_mpc.drone_mpc import DroneMPC
 from closed_loop_rrt import ClosedLoopRRT
 from obstacle import ObstacleBicycle
 import utils
@@ -21,16 +23,54 @@ import threading
 
 class Px4Controller:
     def __init__(self):
+        # Discrete Dynamics
+        self.N = 3
+        self.dt = 0.1
+        self.state_dim = 7
+        self.ctrl_dim = 4
+        self.A = np.eye(self.state_dim)
+        self.A[0:3, 3:6] = np.eye(3) * self.dt
+        self.B = np.zeros((self.state_dim, self.ctrl_dim))
+        self.B[:3, :3] = 0.5 * np.eye(3) * self.dt ** 2
+        self.B[3:, :] = np.eye(4) * self.dt
+
+        self.Ac = np.eye(self.state_dim)
+        self.Ac[0:3, 3:6] = np.eye(3)
+        self.Bc = np.zeros((self.state_dim, self.ctrl_dim))
+        self.Bc[:3, :3] = 0.5 * np.eye(3)
+        self.Bc[3:, :] = np.eye(4)
+
+        # Quadratic Costs
+        self.Q = np.diag([20, 20, 20, 0.1, 0.1, 0.1, 0.1])
+        self.R = np.diag([.1, .1, .1, 10])
+
+        # MPC
+        self.N_mpc = 3
+        self.S = 5 * self.Q
+        # self.gamma = np.linspace(start=1, stop=0.3, num=self.N_mpc + 1).reshape((self.N_mpc + 1, 1, 1))
+        # self.Qs = np.tile(self.Q[np.newaxis, :], (self.N_mpc + 1, 1, 1)) * self.gamma
+        # self.S = self.Qs[-1]
+
+        # State and Control Constraints
+        # x_constraints = np.array([[np.Inf, np.Inf, np.Inf, 2.0, 2.0, 2.0, np.Inf]]).T
+        # x_constraints = np.hstack([-x_constraints, x_constraints])
+        # u_constraints = np.array([[1.0, 1.0, 1.0, (math.pi / 16) * self.dt]]).T
+        # u_constraints = np.hstack([-u_constraints, u_constraints])
+        x_constraints = None
+        u_constraints = None
+
         # motion planner
+        self.radius = 0.5
         self.threshold_timeout = 0.5
         self.return_home_timeout = 3
-        self.N = 10
-        self.dt = 0.1
         self.rate = rospy.Rate(int(1 / self.dt))  # Hz
         self.T = self.N * self.dt
-        # self.drone_mpc = DroneMPC(N=self.N, dt=self.dt, load_solver=True)
-        self.radius = 0.5
-        self.planner = ClosedLoopRRT(N=self.N, dt=self.dt, space_dim=3, dist_tol=0.1, ds=1.0, radius=self.radius)
+        self.planner = ClosedLoopRRT(
+            A=self.Ac, B=self.Bc, Q=self.Q, R=self.R, S=self.S,
+            N=self.N, dt=self.dt, space_dim=3, dist_tol=0.1, ds=1.0, radius=self.radius)
+        self.controller = DroneMPC(A=self.Ac, B=self.Bc, Q=self.Q, S=self.S, R=self.R,
+                                   N=self.N_mpc, dt=self.dt,
+                                   x_constraints=x_constraints, u_constraints=u_constraints)
         self.t_offset = 0
         self.t_solved = time.time() + self.t_offset
         self.solver_thread = None
@@ -91,6 +131,7 @@ class Px4Controller:
         # self.att_control_pub = rospy.Publisher('mavros/setpoint_attitude/attitude', PoseStamped, queue_size=10)
         self.thrust_control_pub = rospy.Publisher('mavros/setpoint_attitude/thrust', Thrust, queue_size=10)
         self.output_path_pub = rospy.Publisher('/hawkeye/drone_path', Path, queue_size=10)
+        self.output_path_mpc_pub = rospy.Publisher('/hawkeye/drone_path_mpc', Path, queue_size=10)
 
         # Services
         self.armService = rospy.ServiceProxy('/mavros/cmd/arming', CommandBool)
@@ -210,22 +251,51 @@ class Px4Controller:
         self.solved = True
 
     def use_prev_traj(self):
-        try:
-            path_index = min(self.path_index, len(self.planner.trajectory) - 1)
-            x, y, z = self.planner.trajectory[path_index, :3]
-            yaw = self.planner.trajectory[path_index, self.yaw_index] % (2 * math.pi)
-        except IndexError:
-            # This is a race condition where thread finishes and changes planner.trajectory after we measure its length
-            # update path index again
-            path_index = min(self.path_index, len(self.planner.trajectory) - 1)
-            x, y, z = self.planner.trajectory[path_index, :3]
-            yaw = self.planner.trajectory[path_index, self.yaw_index] % (2 * math.pi)
+        # try:
+        self.planner.lock.acquire()
+        start = min(self.path_index, len(self.planner.trajectory) - 1)
+        end = min(start + self.N_mpc + 1, len(self.planner.trajectory))
+        remainder = self.N_mpc + 1 - (end - start)
+        xref = self.planner.trajectory[start:end, :self.yaw_index + 1]
 
-        print(path_index)
-        # thrust, phi, theta, psi = self.drone_mpc.inverse_dyn(q=self.local_q, x_ref=self.X_mpc[1], u=self.U_mpc[path_index])
+        # duplicate last state for remainder of trajectory
+        xref = np.vstack([xref, np.tile(xref[-1, :], (remainder, 1))])
+        self.planner.lock.release()
 
-        target_q = Rotation.from_euler("XYZ", [0, 0, yaw]).as_quat()
-        pose_msg = self.construct_pose_target(x=x, y=y, z=z, q=target_q)
+        # xref, yref, zref = self.planner.trajectory[start, :3]
+        # yaw_ref = self.planner.trajectory[start, self.yaw_index] % (2 * math.pi)
+        # except IndexError:
+        #     # This is a race condition where thread finishes and changes planner.trajectory after we measure its length
+        #     # update path index again
+        #     start = min(self.path_index, len(self.planner.trajectory) - 1)
+        #     end = min(start + self.N, len(self.planner.trajectory))
+        #     remainder = self.N - (end - start)
+        #     xref = self.planner.trajectory[start:end, :self.state_dim + 1]
+        #     xref = np.vstack()
+        #
+        #     # xref, yref, zref = self.planner.trajectory[start, :3]
+        #     # yaw_ref = self.planner.trajectory[start, self.yaw_index] % (2 * math.pi)
+
+        yaw = Rotation.from_quat(self.local_q).as_euler("XYZ")[-1]
+        x = np.array([[
+            self.local_pose.pose.position.x,
+            self.local_pose.pose.position.y,
+            self.local_pose.pose.position.z,
+            self.local_vel.twist.linear.x,
+            self.local_vel.twist.linear.y,
+            self.local_vel.twist.linear.z,
+            yaw
+        ]]).T  # state_dim x 1
+        U_mpc, X_mpc = self.controller.solve(x, xref.T)
+        self.output_path_mpc_pub.publish(
+            utils.create_path(traj=X_mpc, dt=self.dt, frame="world"))
+
+        # u = U_mpc[0] + self.Gff
+        # thrust, phi, theta, psi = inverse_dyn(q=self.local_q, x_ref=x[0], u=u)
+
+        x = X_mpc[1]
+        target_q = Rotation.from_euler("XYZ", [0, 0, x[self.yaw_index]]).as_quat()
+        pose_msg = self.construct_pose_target(x=x[0], y=x[1], z=x[2], q=target_q)
 
         return pose_msg
 

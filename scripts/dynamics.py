@@ -4,26 +4,23 @@ from scipy.spatial.transform import Rotation
 import matplotlib.pyplot as plt
 import math
 
+from drone_mpc.drone_mpc import DroneMPC
+
 
 class DroneDynamics(object):
-    def __init__(self, N, dt):
+    def __init__(self, A, B, Q, R, S, N, dt):
         self.N = N
         self.dt = dt
-        self.state_dim = 7
-        self.ctrl_dim = 4
+        self.state_dim = A.shape[0]
+        self.ctrl_dim = B.shape[1]
 
-        # Discrete Dynamics
-        self.A = np.eye(self.state_dim)
-        self.A[0:3, 3:6] = np.eye(3) * self.dt
-        self.B = np.zeros((self.state_dim, self.ctrl_dim))
-        self.B[:3, :3] = 0.5 * np.eye(3) * self.dt ** 2
-        self.B[3:, :] = np.eye(4) * self.dt
+        self.A = A
+        self.B = B
+        self.Q = Q
+        self.S = S  # terminal cost weights
+        self.R = R
 
-        # Quadratic Costs
-        self.Q = np.diag([10, 10, 10, 0.01, 0.01, 0.01, 0.01])
-        self.R = np.eye(self.ctrl_dim) * 0.1
-
-        S = np.array(scipy.linalg.solve_discrete_are(self.A, self.B, self.Q, self.R))
+        S = np.array(scipy.linalg.solve_discrete_are(self.A, self.B, self.S, self.R))
         K = np.array(scipy.linalg.inv(self.B.T @ S @ self.B + self.R) @ (self.B.T @ S @ self.A))
 
         # Lifted Dynamics for fast LQR rollout
@@ -31,12 +28,20 @@ class DroneDynamics(object):
         self.Abar = self.build_a_bar(self.A, self.B, K)
         self.Bbar = self.build_b_bar(self.A, self.B, K)
 
-        S = [None for i in range(self.N + 1)]  # P
-        self.Ks = [None for i in range(self.N)]
-        S[-1] = 10 * self.Q
-        for k in range(self.N - 1, -1, -1):
-            self.Ks[k] = scipy.linalg.inv(self.R + self.B.T @ S[k + 1] @ self.B) @ self.B.T @ S[k + 1] @ self.A
-            S[k] = self.Q + self.A.T @ S[k + 1] @ self.A - self.A.T @ S[k + 1] @ self.B @ self.Ks[k]
+        # x_constraints = np.array([[np.Inf, np.Inf, np.Inf, 2.0, 2.0, 2.0, np.Inf]]).T
+        # x_constraints = np.hstack([-x_constraints, x_constraints])
+        # u_constraints = np.array([[1.0, 1.0, 1.0, (math.pi / 16) * self.dt]]).T
+        # u_constraints = np.hstack([-u_constraints, u_constraints])
+        self.drone_mpc = DroneMPC(A=self.A, B=self.B, Q=self.Q, S=self.S, R=self.R,
+                                  N=self.N, dt=self.dt,
+                                  x_constraints=None, u_constraints=None)
+
+        # S = [None for i in range(self.N + 1)]  # P
+        # self.Ks = [None for i in range(self.N)]
+        # S[-1] = 10 * self.Q
+        # for k in range(self.N - 1, -1, -1):
+        #     self.Ks[k] = scipy.linalg.inv(self.R + self.B.T @ S[k + 1] @ self.B) @ self.B.T @ S[k + 1] @ self.A
+        #     S[k] = self.Q + self.A.T @ S[k + 1] @ self.A - self.A.T @ S[k + 1] @ self.B @ self.Ks[k]
 
     def rollout_with_time(self, x0, xg):
         t0 = x0[-1]
@@ -48,15 +53,14 @@ class DroneDynamics(object):
         """
         solve a discrete Algebraic Riccati equation (DARE)
         """
-        # x = np.copy(x0)
-        # xs = np.zeros((self.N, self.state_dim))
-        # for i in range(self.N):
-        #     x = self.A @ x + self.B @ -self.Ks[i] @ (x - xg)
-        #     xs[i, :] = x
-        #
-        # return xs
-        xs = self.Abar @ x0 + self.Bbar @ np.tile(xg, (self.N))
-        return xs.reshape(self.N, self.state_dim)
+        x0 = x0[:, np.newaxis]
+        xg = xg[np.newaxis]
+        xref = np.vstack([xg, np.tile(xg, (self.N, 1))])
+        U_mpc, X_mpc = self.drone_mpc.solve(x0, xref.T)
+        return X_mpc[1:]
+
+        # xs = self.Abar @ x0 + self.Bbar @ np.tile(xg, self.N)
+        # return xs.reshape(self.N, self.state_dim)
 
     def build_a_bar(self, A, B, K):
         rm = cm = A.shape[0]
