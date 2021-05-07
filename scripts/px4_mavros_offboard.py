@@ -24,7 +24,7 @@ import threading
 class Px4Controller:
     def __init__(self):
         # Discrete Dynamics
-        self.N = 3
+        self.N = 10
         self.dt = 0.1
         self.state_dim = 7
         self.ctrl_dim = 4
@@ -45,7 +45,7 @@ class Px4Controller:
         self.R = np.diag([.1, .1, .1, 10])
 
         # MPC
-        self.N_mpc = 3
+        self.N_mpc = 10
         self.S = 5 * self.Q
         # self.gamma = np.linspace(start=1, stop=0.3, num=self.N_mpc + 1).reshape((self.N_mpc + 1, 1, 1))
         # self.Qs = np.tile(self.Q[np.newaxis, :], (self.N_mpc + 1, 1, 1)) * self.gamma
@@ -66,7 +66,7 @@ class Px4Controller:
         self.rate = rospy.Rate(int(1 / self.dt))  # Hz
         self.T = self.N * self.dt
         self.planner = ClosedLoopRRT(
-            A=self.Ac, B=self.Bc, Q=self.Q, R=self.R, S=self.S,
+            A=self.A, B=self.B, Q=self.Q, R=self.R, S=self.S,
             N=self.N, dt=self.dt, space_dim=3, dist_tol=0.1, ds=1.0, radius=self.radius)
         self.controller = DroneMPC(A=self.Ac, B=self.Bc, Q=self.Q, S=self.S, R=self.R,
                                    N=self.N_mpc, dt=self.dt,
@@ -234,10 +234,12 @@ class Px4Controller:
         ])
 
         start_time = time.time()
-        plan_changed = self.planner.replan(
+        plan_changed, nearest_idx = self.planner.replan(
             x, self.xg, obstacles=self.obstacles, replan=self.solved)
-        if plan_changed:
-            self.path_index = 0
+
+        self.path_index = nearest_idx + 1
+
+        print("Didn't change")
 
         # execute next step
         # TODO: this might need to be rollout_with_time if waypoints
@@ -261,6 +263,7 @@ class Px4Controller:
         # duplicate last state for remainder of trajectory
         xref = np.vstack([xref, np.tile(xref[-1, :], (remainder, 1))])
         self.planner.lock.release()
+        print(np.array2string(xref[:, :3], precision=2))
 
         # xref, yref, zref = self.planner.trajectory[start, :3]
         # yaw_ref = self.planner.trajectory[start, self.yaw_index] % (2 * math.pi)
@@ -363,7 +366,6 @@ class Px4Controller:
 
             if self.mavros_state == State.MODE_PX4_OFFBOARD:
                 if self.solver_thread is None or not self.solver_thread.is_alive():
-                    print("Generating action!")
                     # Spawn a process to run this independently:
                     self.solver_thread = threading.Thread(target=self.generate_action)
                     self.solver_thread.start()
@@ -374,7 +376,6 @@ class Px4Controller:
                     self.pos_control_pub.publish(desired_pos)
                 else:
                     self.pos_control_pub.publish(self.use_prev_traj())
-                    self.path_index += 1
 
                 if self.planner.trajectory is not None:
                     self.output_path_pub.publish(

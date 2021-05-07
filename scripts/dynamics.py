@@ -53,14 +53,14 @@ class DroneDynamics(object):
         """
         solve a discrete Algebraic Riccati equation (DARE)
         """
-        x0 = x0[:, np.newaxis]
-        xg = xg[np.newaxis]
-        xref = np.vstack([xg, np.tile(xg, (self.N, 1))])
-        U_mpc, X_mpc = self.drone_mpc.solve(x0, xref.T)
-        return X_mpc[1:]
+        # x0 = x0[:, np.newaxis]
+        # xg = xg[np.newaxis]
+        # xref = np.vstack([xg, np.tile(xg, (self.N, 1))])
+        # U_mpc, X_mpc = self.drone_mpc.solve(x0, xref.T)
+        # return X_mpc[1:]
 
-        # xs = self.Abar @ x0 + self.Bbar @ np.tile(xg, self.N)
-        # return xs.reshape(self.N, self.state_dim)
+        xs = self.Abar @ x0 + self.Bbar @ np.tile(xg, self.N)
+        return xs.reshape(self.N, self.state_dim)
 
     def build_a_bar(self, A, B, K):
         rm = cm = A.shape[0]

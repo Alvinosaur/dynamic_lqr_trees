@@ -19,7 +19,7 @@ class ClosedLoopRRT(object):
 
     def reuse_valid(self, x0, obstacles):
         if self.trajectory is None:
-            return False, False
+            return False, False, None, None
 
         # find nearest point in trajectory
         distances = np.linalg.norm(self.trajectory[:, :self.space_dim] - x0[np.newaxis, :self.space_dim], axis=1)
@@ -48,22 +48,21 @@ class ClosedLoopRRT(object):
         _, has_collision = self.filter_samples(trajectory, obstacles)
         if has_collision:
             print("Rest of path has collision!")
-            return False, False, None
+            return False, False, None, None
         else:
-            plan_changed = nearest_idx > 2
-            return True, plan_changed, trajectory
+            plan_changed = nearest_idx > 0
+            return True, plan_changed, trajectory, nearest_idx
 
     def replan(self, x0, xg, obstacles, with_time=False, replan=True):
         # Try reusing pre-existing plan if available
         # destructively modifies old waypoints and traj pieces
         if replan:
-            is_valid, plan_changed, trajectory = self.reuse_valid(x0, obstacles)
+            is_valid, plan_changed, trajectory, nearest_idx = self.reuse_valid(x0, obstacles)
             if is_valid:
-                print("Plan: %d" % plan_changed)
                 self.lock.acquire()
                 self.trajectory = trajectory
                 self.lock.release()
-                return plan_changed
+                return plan_changed, nearest_idx
 
         state_dim = len(x0)
         found_path = False
@@ -134,7 +133,8 @@ class ClosedLoopRRT(object):
             self.lock.release()
 
             plan_changed = True
-            return plan_changed
+            nearest_idx = 0
+            return plan_changed, nearest_idx
 
         else:
             raise (Exception("Failed to find a plan???"))
