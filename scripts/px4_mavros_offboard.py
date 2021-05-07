@@ -26,6 +26,7 @@ class Px4Controller:
         self.return_home_timeout = 3
         self.N = 10
         self.dt = 0.1
+        self.rate = rospy.Rate(int(1 / self.dt))  # Hz
         self.T = self.N * self.dt
         # self.drone_mpc = DroneMPC(N=self.N, dt=self.dt, load_solver=True)
         self.radius = 0.5
@@ -42,8 +43,9 @@ class Px4Controller:
         self.xg = np.array([10.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         self.yaw_index = len(self.x0) - 2  # 2nd to last value
 
-        self.padding = 0.1
-        self.obs_radii = np.array([0.3, 0.6, 0.7, 0.5]) + self.padding
+        self.padding = 0.2
+        self.obs_radii = np.array([0.3, 0.6, 0.7, 0.5, 0.2, 0.2]) + self.padding
+        self.dist_threshes = self.obs_radii + self.radius - self.padding  # distance = sum of two objects' radii
         self.num_obs = len(self.obs_radii)
         self.obstacles = [
             ObstacleBicycle(T=self.T, r=self.obs_radii[i], vmax=1,
@@ -51,6 +53,7 @@ class Px4Controller:
             i in range(self.num_obs)]
 
         self.local_pose = None
+        self.local_pos = None
         self.local_q = None
         self.local_vel = None
 
@@ -62,13 +65,15 @@ class Px4Controller:
         self.U_mpc = None
         self.solved = False
 
+        # Analysis of Performance
+        self.collision_count = 0
+
         # Attitude message
         self.att = AttitudeTarget()
         self.att.body_rate = Vector3()
         self.att.header = Header()
         self.att.header.frame_id = "base_footprint"
 
-        rospy.init_node("offboard_node")
         # Subscribers
         self.local_vel_sub = rospy.Subscriber("/mavros/local_position/velocity_local", TwistStamped,
                                               self.local_vel_callback,
@@ -108,20 +113,38 @@ class Px4Controller:
 
         return self.local_pose is not None and self.local_vel is not None
 
-    def takeoff(self):
-        max_count = 100  # 200 * 0.2 sec = 20 sec for takeoff
-        takeoff_pos = self.construct_pose_target(
-            x=self.x0[0], y=self.x0[1], z=self.x0[2])
+    def reset_to_position(self, pos):
+        max_count = 100  # 200 * 0.1 sec = 10 sec for takeoff
+        pos_msg = self.construct_pose_target(*pos)
+        reached_target = False
         count = 0
-        while not self.takeoff_detection() and count < max_count:
-            self.pos_control_pub.publish(takeoff_pos)
+        while not reached_target and count < max_count:
+            self.pos_control_pub.publish(pos_msg)
             self.arm_state = self.arm()
             self.offboard_state = self.offboard()
             time.sleep(0.2)
-            print("Height: %.3f" % self.local_pose.pose.position.z)
             count += 1
+            reached_target = self.reached_target(self.local_pos, pos, threshold=0.5)
 
-        return count < max_count
+        return reached_target
+
+    def takeoff(self):
+        # fly straight down to the ground
+        ground_pos = np.copy(self.local_pos)
+        ground_pos[-1] = 1
+        if not self.reset_to_position(ground_pos):
+            return False
+
+        # reset to origin
+        home_pos_hover = np.array([0, 0, 1.0])
+        if not self.reset_to_position(home_pos_hover):
+            return False
+
+        # takeoff to x0
+        if not self.reset_to_position(self.x0[:3]):
+            return False
+
+        return True
 
     def control_attitude(self, body_rate=None, target_q=None, thrust=0.705):
         if body_rate is not None:
@@ -171,7 +194,7 @@ class Px4Controller:
 
         start_time = time.time()
         plan_changed = self.planner.replan(
-            x, self.xg, obstacles=self.obstacles)
+            x, self.xg, obstacles=self.obstacles, replan=self.solved)
         if plan_changed:
             self.path_index = 0
 
@@ -188,13 +211,13 @@ class Px4Controller:
 
     def use_prev_traj(self):
         try:
-            path_index = min(self.path_index, len(self.planner.trajectory)-1)
+            path_index = min(self.path_index, len(self.planner.trajectory) - 1)
             x, y, z = self.planner.trajectory[path_index, :3]
             yaw = self.planner.trajectory[path_index, self.yaw_index] % (2 * math.pi)
         except IndexError:
             # This is a race condition where thread finishes and changes planner.trajectory after we measure its length
             # update path index again
-            path_index = min(self.path_index, len(self.planner.trajectory)-1)
+            path_index = min(self.path_index, len(self.planner.trajectory) - 1)
             x, y, z = self.planner.trajectory[path_index, :3]
             yaw = self.planner.trajectory[path_index, self.yaw_index] % (2 * math.pi)
 
@@ -216,6 +239,11 @@ class Px4Controller:
     def local_pose_callback(self, msg):
         self.local_pose = msg
         self.local_q = self.quat_from_pose(msg)
+        self.local_pos = np.array([
+            msg.pose.position.x,
+            msg.pose.position.y,
+            msg.pose.position.z,
+        ])
 
     def local_vel_callback(self, msg):
         self.local_vel = msg
@@ -245,46 +273,26 @@ class Px4Controller:
             print("Vehicle Offboard failed")
             return False
 
-    def takeoff_detection(self):
-        cur = np.array([self.local_pose.pose.position.x,
-                        self.local_pose.pose.position.y,
-                        self.local_pose.pose.position.z])
-        dist = np.linalg.norm(cur - self.x0[:3])
-        return dist < 0.5 and self.arm_state
+    def check_collision(self):
+        obs_poses = np.array([
+            self.obstacles[i].traj[0] for i in range(self.num_obs)
+        ])
+        distances = np.linalg.norm(obs_poses - self.local_pos[np.newaxis, :], axis=1)
+        return np.sum(distances < self.dist_threshes) > 0
 
-    def start(self):
-        if not self.check_connection():
-            print("Failed to connect!")
-            return
+    def plan_execute(self):
+        reached_target = False
+        while not reached_target:
+            if self.check_collision():
+                self.collision_count += 1
+                return
 
-        # takeoff to reach desired tracking height
-        if not self.takeoff():
-            print("Failed to takeoff!")
-            return
-        print("Successful Takeoff!")
-        self.t0 = rospy.get_rostime().to_sec()
-
-        rate = rospy.Rate(int(1 / self.dt))  # Hz
-
-        while self.arm_state and not rospy.is_shutdown():
-            # takeoff_pos = self.construct_pose_target(x=0, y=0, z=self.takeoff_height, q=self.takeoff_q)
-            # count = 0
-            # self.pos_control_pub.publish(takeoff_pos)
-
-            cur_p = np.array([
-                self.local_pose.pose.position.x,
-                self.local_pose.pose.position.y,
-                self.local_pose.pose.position.z
-            ])
-            if self.reached_target(cur_p, target_p=self.xg[:3], threshold=0.3):
+            if self.reached_target(self.local_pos, target_p=self.xg[:3], threshold=0.3):
                 print("Reached Target!")
-                break
+                return
 
             if self.mavros_state == State.MODE_PX4_OFFBOARD:
-                time_since_solved = time.time() - self.t_solved
-                # need_new_plan = time_since_solved > self.T
-                need_new_plan = True
-                if self.solver_thread is None or (not self.solver_thread.is_alive() and need_new_plan):
+                if self.solver_thread is None or not self.solver_thread.is_alive():
                     print("Generating action!")
                     # Spawn a process to run this independently:
                     self.solver_thread = threading.Thread(target=self.generate_action)
@@ -295,14 +303,6 @@ class Px4Controller:
                     desired_pos = self.construct_pose_target(x=self.x0[0], y=self.x0[1], z=self.x0[2])
                     self.pos_control_pub.publish(desired_pos)
                 else:
-                    # print("Using prev path!")
-                    # if self.version == 1:
-                    #     u = self.U_mpc[path_index] + self.Gff
-                    #     x = self.X_mpc[path_index]
-                    #     thrust, phid, thetad, psid = self.drone_mpc.inverse_dyn(self.local_q, x_ref=x, u=u)
-                    #     target_q = Rotation.from_euler("XYZ", [phid, thetad, psid]).as_quat()
-                    #     self.control_attitude(target_q=target_q, thrust=thrust)
-                    # else:
                     self.pos_control_pub.publish(self.use_prev_traj())
                     self.path_index += 1
 
@@ -311,11 +311,38 @@ class Px4Controller:
                         utils.create_path(traj=self.planner.trajectory, dt=self.dt, frame="world"))
 
             try:  # prevent garbage in console output when thread is killed
-                rate.sleep()
+                self.rate.sleep()
             except rospy.ROSInterruptException:
-                pass
+                return
+
+    def start(self):
+        if not self.check_connection():
+            print("Failed to connect!")
+            return
+
+        iter = 0
+        num_trials = 10
+        while not rospy.is_shutdown() and iter < num_trials:
+            iter += 1
+            # takeoff to reach desired tracking height
+            if not self.takeoff():
+                print("Failed to takeoff!")
+                return
+            print("Successful Takeoff!")
+
+            self.plan_execute()
+            self.solved = False
+
+            try:  # prevent garbage in console output when thread is killed
+                self.rate.sleep()
+            except rospy.ROSInterruptException:
+                break
+
+        print("Num Collisions: %d" % self.collision_count)
+        print("Collision Rate: %.3f" % (self.collision_count / num_trials))
 
 
 if __name__ == '__main__':
+    rospy.init_node("offboard_node")
     con = Px4Controller()
     con.start()

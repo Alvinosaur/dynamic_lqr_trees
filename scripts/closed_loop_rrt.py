@@ -55,13 +55,14 @@ class ClosedLoopRRT(object):
             plan_changed = nearest_idx > 2
             return True, plan_changed
 
-    def replan(self, x0, xg, obstacles, with_time=False):
+    def replan(self, x0, xg, obstacles, with_time=False, replan=True):
         # Try reusing pre-existing plan if available
         # destructively modifies old waypoints and traj pieces
-        is_valid, plan_changed = self.reuse_valid(x0, obstacles)
-        if is_valid:
-            print("Plan: %d" % plan_changed)
-            return plan_changed
+        if replan:
+            is_valid, plan_changed = self.reuse_valid(x0, obstacles)
+            if is_valid:
+                print("Plan: %d" % plan_changed)
+                return plan_changed
 
         state_dim = len(x0)
         found_path = False

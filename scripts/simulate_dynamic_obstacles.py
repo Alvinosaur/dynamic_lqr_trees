@@ -33,34 +33,41 @@ class SimDynamicObstacles:
         self.dt = 0.1
         self.T_complete = 7  # seconds for each obstacle to complete one pass
         self.T_pred = 1  # output ground truth path duration in seconds
-        num_obs = 4  # num obstacles
-        self.num_obs = num_obs
         self.min_pts = 10
         self.max_pts = 20
         self.t0 = time.time()
         self.reversed = False
         self.noise = 0
-        self.obs_radii = [0.3, 0.6, 0.7, 0.5]
+        self.obs_radii = [0.3, 0.6, 0.7, 0.5, 0.2, 0.2]
 
         self.starts = np.array([
             [2, -2, 4],
             [6, -1, 3],
             [4, 1.5, 5],
-            [8, 0, 3]
+            [8, 0, 3],
+            [8, -2, 1],
+            [7, -2, 3],  # [7, -4, 3],
         ])
 
         self.goals = np.array([
             [4, 2, 2],
             [6, 1, 3],
             [2, -1.5, 2],
-            [8, 0, 3]
+            [8, 0, 3],
+            [6, 2, 5],  # [6, 2, 8],
+            [9, 2, 3],  # [9, 4, 3],
         ])
+        speeds = np.linalg.norm(self.goals - self.starts, axis=1) / self.T_complete
+        print(speeds)
+        assert(np.sum(speeds > 1) == 0)
 
-        self.splines = [self.gen_random_traj(self.starts[i], self.goals[i]) for i in range(num_obs)]
-        self.obstacle_pose_pub = rospy.Publisher('/gazebo/set_model_state', ModelState, queue_size=10 * num_obs)
+        self.num_obs = len(self.starts)
+
+        self.splines = [self.gen_random_traj(self.starts[i], self.goals[i]) for i in range(self.num_obs)]
+        self.obstacle_pose_pub = rospy.Publisher('/gazebo/set_model_state', ModelState, queue_size=10 * self.num_obs)
         self.obstacle_marker_pub = rospy.Publisher('/dynamic_lqr_trees/obstacle_markers', MarkerArray, queue_size=10)
         self.obstacle_path_pubs = [
-            rospy.Publisher(f'/dynamic_lqr_trees/obs_path_{i}', Path, queue_size=10) for i in range(num_obs)]
+            rospy.Publisher(f'/dynamic_lqr_trees/obs_path_{i}', Path, queue_size=10) for i in range(self.num_obs)]
 
     def reset_t0(self, t0):
         self.t0 = t0
@@ -126,9 +133,9 @@ class SimDynamicObstacles:
             marker.color.g = 0.0
             marker.color.b = 0.0
             marker.color.a = 1.0
-            marker.scale.x = self.obs_radii[i]
-            marker.scale.y = self.obs_radii[i]
-            marker.scale.z = self.obs_radii[i]
+            marker.scale.x = 2 * self.obs_radii[i]
+            marker.scale.y = 2 * self.obs_radii[i]
+            marker.scale.z = 2 * self.obs_radii[i]
             marker.ns = "obstacle"
             marker_array_msg.markers.append(marker)
 

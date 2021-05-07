@@ -35,7 +35,7 @@ class ObstacleBicycle(object):
         # scale predicted reachable set down if velocity < vmax
         # this assumes vmax reachable set is a superset of any lower velocity's set
         velocity = min(self.vmax, velocity)
-        idx = np.rint((self.N - 1) * velocity / self.vmax)
+        idx = int(np.rint((self.N - 1) * velocity / self.vmax))
 
         # apply translation and rotation
         endpoints = self.reachable_trajs[:, idx, :self.space_dim]  # don't include theta in positions
