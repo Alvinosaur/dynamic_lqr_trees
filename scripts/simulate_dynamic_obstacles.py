@@ -32,7 +32,7 @@ class SimDynamicObstacles:
     def __init__(self):
         self.dt = 0.1
         self.T_complete = 7  # seconds for each obstacle to complete one pass
-        self.T_pred = 1  # output ground truth path duration in seconds
+        self.T_pred = 3  # output ground truth path duration in seconds
         self.min_pts = 10
         self.max_pts = 20
         self.t0 = time.time()
@@ -59,7 +59,7 @@ class SimDynamicObstacles:
         ])
         speeds = np.linalg.norm(self.goals - self.starts, axis=1) / self.T_complete
         print(speeds)
-        assert(np.sum(speeds > 1) == 0)
+        assert (np.sum(speeds > 1) == 0)
 
         self.num_obs = len(self.starts)
 

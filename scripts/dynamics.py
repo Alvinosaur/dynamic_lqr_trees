@@ -18,6 +18,8 @@ class DroneDynamics(object):
         self.B = np.zeros((self.state_dim, self.ctrl_dim))
         self.B[:3, :3] = 0.5 * np.eye(3) * self.dt ** 2
         self.B[3:, :] = np.eye(4) * self.dt
+        print(self.A)
+        print(self.B)
 
         # Quadratic Costs
         self.Q = np.diag([10, 10, 10, 0.01, 0.01, 0.01, 0.01])

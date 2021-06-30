@@ -37,6 +37,7 @@ class Px4Controller:
         self.Gff = np.array([0, 0, 9.8, 0])
         self.time_to_solve = 3
         self.path_index = 0
+        self.dist_thresh = 1.0
 
         # Takeoff
         self.x0 = np.array([0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0])
@@ -47,8 +48,10 @@ class Px4Controller:
         self.obs_radii = np.array([0.3, 0.6, 0.7, 0.5, 0.2, 0.2]) + self.padding
         self.dist_threshes = self.obs_radii + self.radius - self.padding  # distance = sum of two objects' radii
         self.num_obs = len(self.obs_radii)
+        vmax = 2
+        self.T_obs_pred = 3
         self.obstacles = [
-            ObstacleBicycle(T=self.T, r=self.obs_radii[i], vmax=1,
+            ObstacleBicycle(T=self.T_obs_pred, r=self.obs_radii[i], vmax=vmax,
                             max_steer_phi=0.5, max_steer_psi=0.5, num_angles=2) for
             i in range(self.num_obs)]
 
@@ -192,11 +195,18 @@ class Px4Controller:
             0.0  # reset time to 0, assumes obstacles published fast enough
         ])
 
+        solve_freq = 0.4
+        t_since_solved = time.time() - self.t_solved
+        solve_new = not self.solved or t_since_solved > solve_freq
+        print(t_since_solved > solve_freq)
+
         start_time = time.time()
         plan_changed = self.planner.replan(
-            x, self.xg, obstacles=self.obstacles, replan=self.solved)
+            x, self.xg, obstacles=self.obstacles, replan=solve_new)
+
         if plan_changed:
             self.path_index = 0
+            self.t_solved = time.time()
 
         # execute next step
         # TODO: this might need to be rollout_with_time if waypoints
@@ -206,20 +216,24 @@ class Px4Controller:
         self.time_to_solve = end_time - start_time
 
         print("Finished solving in time %.3f" % (end_time - start_time))
-        self.t_solved = time.time()
+
         self.solved = True
 
     def use_prev_traj(self):
-        try:
-            path_index = min(self.path_index, len(self.planner.trajectory) - 1)
-            x, y, z = self.planner.trajectory[path_index, :3]
-            yaw = self.planner.trajectory[path_index, self.yaw_index] % (2 * math.pi)
-        except IndexError:
-            # This is a race condition where thread finishes and changes planner.trajectory after we measure its length
-            # update path index again
-            path_index = min(self.path_index, len(self.planner.trajectory) - 1)
-            x, y, z = self.planner.trajectory[path_index, :3]
-            yaw = self.planner.trajectory[path_index, self.yaw_index] % (2 * math.pi)
+        self.planner.lock.acquire()
+        path_index = min(self.path_index, len(self.planner.trajectory) - 1)
+        x, y, z = self.planner.trajectory[path_index, :3]
+
+        cur_pos = np.array([self.local_pose.pose.position.x,
+                            self.local_pose.pose.position.y,
+                            self.local_pose.pose.position.z])
+        dist = np.linalg.norm(self.planner.trajectory[path_index, :3] - cur_pos)
+        # if dist > self.dist_thresh and self.path_index > 0:
+        #     self.path_index -= 1
+        #     path_index -= 1
+
+        yaw = self.planner.trajectory[path_index, self.yaw_index] % (2 * math.pi)
+        self.planner.lock.release()
 
         print(path_index)
         # thrust, phi, theta, psi = self.drone_mpc.inverse_dyn(q=self.local_q, x_ref=self.X_mpc[1], u=self.U_mpc[path_index])
